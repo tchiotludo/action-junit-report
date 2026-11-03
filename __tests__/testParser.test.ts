@@ -1,5 +1,14 @@
-import {parseFile, parseTestReports, resolveFileAndLine, resolvePath, Transformer} from '../src/testParser.js'
+import {
+  addToModuleResults,
+  getModuleName,
+  parseFile,
+  parseTestReports,
+  resolveFileAndLine,
+  resolvePath,
+  Transformer
+} from '../src/testParser.js'
 import {describe, expect, it} from 'vitest'
+import {TestResult} from '../src/testParser.js'
 
 /**
  * Original test cases:
@@ -15,6 +24,43 @@ describe('resolveFileAndLine', () => {
     const {fileName, line} = await resolveFileAndLine(null, null, 'someClassName', 'not a stacktrace')
     expect(fileName).toBe('someClassName')
     expect(line).toBe(1)
+  })
+
+  it('should use a path classname as file name instead of its last dotted segment', async () => {
+    const {fileName} = await resolveFileAndLine(
+      null,
+      null,
+      'src/tests/utils/failed-summary.spec.ts',
+      'not a stacktrace'
+    )
+    expect(fileName).toBe('src/tests/utils/failed-summary.spec.ts')
+  })
+
+  it('should keep using the last dotted segment for a Java class name', async () => {
+    const {fileName} = await resolveFileAndLine(null, null, 'action.surefire.report.calc.CalcUtilsTest', 'x')
+    expect(fileName).toBe('CalcUtilsTest')
+  })
+
+  it('should not treat a Go package path as a file', async () => {
+    const {fileName} = await resolveFileAndLine(null, null, 'github.com/example/server/v8/channels/api4', 'x')
+    // unchanged legacy behavior: split on the dot of the host name
+    expect(fileName).toBe('com/example/server/v8/channels/api4')
+  })
+
+  it('should prefer the explicit file attribute over a path classname', async () => {
+    const {fileName} = await resolveFileAndLine('explicit.ts', null, 'src/a/b.spec.ts', 'x')
+    expect(fileName).toBe('explicit.ts')
+  })
+
+  it('should resolve the line from the stacktrace for a path classname', async () => {
+    const {fileName, line} = await resolveFileAndLine(
+      null,
+      null,
+      'src/a/b.spec.ts',
+      'AssertionError\n at Object.<anonymous> (src/a/b.spec.ts:42:7)'
+    )
+    expect(fileName).toBe('src/a/b.spec.ts')
+    expect(line).toBe(42)
   })
 
   it('should parse correctly fileName and line for a Java file', async () => {
@@ -182,6 +228,28 @@ describe('parseFile', () => {
           'java.lang.AssertionError: \n\nExpected: <100.10>\n     but: was <100.11>\n\tat action.surefire.report.calc.CalcUtilsTest.test scale(CalcUtilsTest.kt:15)'
       }
     ])
+  })
+
+  it('should use a path-like classname as annotation path and title', async () => {
+    const testResult = await parseFile('test_results/vitest/report.xml', '', false, false, false, [], undefined)
+    const [a] = testResult!!.globalAnnotations
+    expect(a.path).toBe('src/tests/utils/failed-summary.spec.ts')
+    expect(a.title).toBe('src/tests/utils/failed-summary.spec.ts.renders summary')
+  })
+
+  it('should render CLASS_NAME and FILE_NAME for a path-like classname', async () => {
+    const testResult = await parseFile(
+      'test_results/vitest/report.xml',
+      '',
+      false,
+      false,
+      false,
+      [],
+      '{{FILE_NAME}}|{{CLASS_NAME}}|{{TEST_NAME}}'
+    )
+    expect(testResult!!.globalAnnotations[0].title).toBe(
+      'src/tests/utils/failed-summary.spec.ts|src/tests/utils/failed-summary.spec.ts|renders summary'
+    )
   })
 
   it('should skip after reaching annotations_limit', async () => {
@@ -1844,5 +1912,63 @@ describe('parseTestReports', () => {
     // Both transformers should be applied: "python/test_sample" -> "test_sample" -> "sample"
     expect(filtered[0].title).toBe('sample | test_which_fails')
     expect(filtered[1].title).toBe('sample | test_with_error')
+  })
+})
+
+describe('module reports', () => {
+  it('derives the module from the first capture group', () => {
+    const regex = /^(.+?)\/build\//
+    expect(getModuleName('core/build/test-results/test/TEST-a.xml', regex)).toBe('core')
+    expect(getModuleName('./services/api/build/test-results/test/TEST-a.xml', regex)).toBe('services/api')
+    expect(getModuleName('reports/unit/TEST-a.xml', regex)).toBe('.')
+    expect(getModuleName('a/b/target/TEST-a.xml', /^(?:.*\/)?([^/]+)\/target\//)).toBe('b')
+  })
+
+  it('matches absolute report paths relative to the workspace', () => {
+    const regex = /^(.+?)\/build\//
+    const abs = `${process.cwd()}/core/build/test-results/test/TEST-a.xml`
+    expect(getModuleName(abs, regex)).toBe('core')
+    expect(getModuleName('/elsewhere/core/build/TEST-a.xml', regex)).toBe('/elsewhere/core')
+  })
+
+  it('merges file results per module', async () => {
+    const result = await parseTestReports(
+      'Tests',
+      '',
+      'test_results/**/*.xml',
+      '',
+      false,
+      false,
+      false,
+      [],
+      undefined,
+      '/'
+    )
+    const modules = new Map<string, TestResult>()
+    addToModuleResults(modules, 'Tests', '', result.testResults, /^test_results\/([^/]+)\//)
+    const total = [...modules.values()].reduce((sum, m) => sum + m.totalCount, 0)
+    expect(total).toBe(result.totalCount)
+    expect(modules.size).toBeGreaterThan(1)
+    for (const [name, m] of modules) expect(m.checkName).toBe(`Tests | ${name}`)
+  })
+
+  it('keeps annotations from nested suites', async () => {
+    const result = await parseTestReports(
+      'Tests',
+      '',
+      'test_results/python/report.xml',
+      '',
+      false,
+      false,
+      false,
+      [],
+      undefined,
+      '/'
+    )
+    const modules = new Map<string, TestResult>()
+    addToModuleResults(modules, 'Tests', '', result.testResults, /^(.+)\//)
+    const annotations = [...modules.values()].flatMap(m => m.globalAnnotations)
+    expect(annotations.length).toBe(result.globalAnnotations.length)
+    expect(annotations.length).toBeGreaterThan(0)
   })
 })
