@@ -1,7 +1,7 @@
 import * as core from '@actions/core'
 import {Annotation, TestResult} from './testParser.js'
 import * as github from '@actions/github'
-import {buildLink, buildList, buildTable} from './utils.js'
+import {buildLink, buildList, buildTable, escapeHtml} from './utils.js'
 import {SummaryTableRow} from './types.js'
 
 type GitHub = ReturnType<typeof github.getOctokit>
@@ -74,12 +74,21 @@ export async function annotateTestResult(
 
       core.debug(JSON.stringify(checks, null, 2))
 
-      const check_run_id = checks.data.check_runs[0].id
+      const checkRun = checks.data.check_runs[0]
+      if (!checkRun) {
+        core.warning(
+          `⚠️ No in progress check named '${jobName}' found for ${headSha}, skipped updating it with ${testResult.checkName}. Make sure 'job_name' matches the check name of the running job, including a custom job 'name' or matrix values.`
+        )
+        return undefined
+      }
+
+      const check_run_id = checkRun.id
       const checkUrl = `${github.context.serverUrl}/${github.context.repo.owner}/${github.context.repo.repo}/runs/${check_run_id}`
 
       if (checkAnnotations) {
         core.info(`ℹ️ - ${testResult.checkName} - Updating checks (Annotations: ${annotations.length})`)
-        for (let i = 0; i < annotations.length; i = i + 50) {
+        // the first update also sets the title and summary, so it has to be sent even without annotations
+        for (let i = 0; i === 0 || i < annotations.length; i = i + 50) {
           const sliced = annotations.slice(i, i + 50)
           await updateChecks(octokit, check_run_id, title, testResult.summary, sliced)
         }
@@ -173,7 +182,7 @@ export async function attachSummary(
   // Add check links to the job summary if any checks were created
   if (checkInfos.length > 0) {
     const links = checkInfos.map(checkInfo => {
-      return buildLink(`View ${checkInfo.name}`, checkInfo.url)
+      return buildLink(`View ${escapeHtml(checkInfo.name)}`, checkInfo.url)
     })
     core.summary.addList(links)
   }
@@ -228,7 +237,7 @@ export async function attachComment(
   // Add check links to the job summary if any checks were created
   if (checkInfos.length > 0) {
     const links = checkInfos.map(checkInfo => {
-      return buildLink(`View ${checkInfo.name}`, checkInfo.url)
+      return buildLink(`View ${escapeHtml(checkInfo.name)}`, checkInfo.url)
     })
     tail += buildList(links)
     tail += `\n\n`
